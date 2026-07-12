@@ -68,20 +68,28 @@ def append_product(path: Path, product: Product) -> Path:
         product.source_url,
         product.resolved_url,
     ])
-    sheet.row_dimensions[row].height = 110
-    for cell in sheet[row]:
-        cell.alignment = Alignment(vertical="top", wrap_text=True)
+    image_urls = list(dict.fromkeys(url for url in product.image_urls if url))
+    image_rows = max(1, len(image_urls))
+    for offset in range(image_rows):
+        current_row = row + offset
+        if offset:
+            sheet.append(["", "", "", "", "", image_urls[offset], "", ""])
+        sheet.row_dimensions[current_row].height = 110
+        for cell in sheet[current_row]:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
 
-    image_path = _download_image(
-        product.image_urls[0] if product.image_urls else "",
-        path.parent / "product-images",
-        product.product_id,
-    )
-    if image_path:
-        image = ExcelImage(str(image_path))
-        image.width = 140
-        image.height = 140
-        sheet.add_image(image, f"F{row}")
-        sheet[f"F{row}"] = ""
+    for index, image_url in enumerate(image_urls):
+        current_row = row + index
+        image_path = _download_image(
+            image_url,
+            path.parent / "product-images",
+            f"{product.product_id}_{index + 1}",
+        )
+        if image_path:
+            image = ExcelImage(str(image_path))
+            image.width = 140
+            image.height = 140
+            sheet.add_image(image, f"F{current_row}")
+            sheet[f"F{current_row}"] = ""
     workbook.save(path)
     return path

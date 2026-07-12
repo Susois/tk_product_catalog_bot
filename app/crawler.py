@@ -128,7 +128,7 @@ async def _extract_product(page: Page, source_url: str) -> Product:
         if match := PRICE_RE.search(body_text):
             product.price = match.group(0)
 
-    product.image_urls = list(dict.fromkeys(product.image_urls))[:10]
+    product.image_urls = list(dict.fromkeys(url for url in product.image_urls if url))
     return product
 
 
