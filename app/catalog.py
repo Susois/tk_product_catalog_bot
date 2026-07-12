@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -138,7 +139,7 @@ def bootstrap_registry_from_excels(directory: Path, registry: ProductRegistry) -
                 registry.register_values(product_id, source_url, resolved_url)
                 changed = changed or before != (len(registry.urls), len(registry.product_ids))
             workbook.close()
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
             continue
     if changed:
         registry.save()

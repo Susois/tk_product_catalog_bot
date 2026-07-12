@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import os
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +16,11 @@ from .models import Product
 
 HEADERS = ["Thời gian", "Mã sản phẩm", "Tên sản phẩm", "Giá", "Tiền tệ", "Ảnh", "Link gốc", "Link TikTok Shop"]
 VIETNAM_TIMEZONE = timezone(timedelta(hours=7))
+
+
+class WorkbookLockedError(RuntimeError):
+    """Raised when Windows prevents replacing an open Excel file."""
+
 
 
 def _new_workbook(path: Path) -> None:
@@ -44,18 +51,72 @@ def _download_image(url: str, image_dir: Path, product_id: str) -> Path | None:
         response = httpx.get(url, follow_redirects=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
         target.write_bytes(response.content)
+        # TikTok often serves WebP/AVIF bytes regardless of the URL or file
+        # extension. openpyxl cannot package WebP images, so always convert the
+        # downloaded image to a real RGB JPEG before embedding it.
         with Image.open(target) as image:
-            image.verify()
+            image.load()
+            if image.mode != "RGB":
+                background = Image.new("RGB", image.size, "white")
+                if "A" in image.getbands():
+                    background.paste(image, mask=image.getchannel("A"))
+                else:
+                    background.paste(image)
+                image = background
+            image.save(target, format="JPEG", quality=90)
         return target
     except (httpx.HTTPError, OSError):
         target.unlink(missing_ok=True)
         return None
 
 
-def append_product(path: Path, product: Product) -> Path:
+def _load_or_recover_workbook(path: Path):
     if not path.exists():
         _new_workbook(path)
-    workbook = load_workbook(path)
+
+    # Validate the Office package before openpyxl touches it. On Windows,
+    # openpyxl may leave its ZipFile handle open when loading a damaged XLSX
+    # raises midway, which then prevents this same process from renaming it.
+    package_is_valid = False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            package_is_valid = "[Content_Types].xml" in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        package_is_valid = False
+
+    if package_is_valid:
+        return load_workbook(path)
+
+    try:
+        # Preserve the broken file for inspection instead of overwriting it.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(f"{path.stem}.corrupt_{timestamp}{path.suffix}")
+        path.replace(backup)
+    except PermissionError as error:
+        raise WorkbookLockedError(
+            f"File Excel '{path.name}' đang bị tiến trình bot cũ hoặc chương trình khác giữ. "
+            "Hãy tắt và chạy lại bot rồi gửi lại link sản phẩm."
+        ) from error
+    _new_workbook(path)
+    return load_workbook(path)
+
+
+def _save_workbook_atomic(workbook, path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.tmp.xlsx")
+    try:
+        workbook.save(temporary)
+        # Verify that the generated XLSX is a valid Office ZIP package before
+        # replacing the user's current catalog.
+        with zipfile.ZipFile(temporary) as archive:
+            if "[Content_Types].xml" not in archive.namelist():
+                raise ValueError("Generated workbook is not a valid XLSX file")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def append_product(path: Path, product: Product) -> Path:
+    workbook = _load_or_recover_workbook(path)
     sheet = workbook["Sản phẩm TikTok"]
     row = sheet.max_row + 1
     sheet.append([
@@ -91,5 +152,13 @@ def append_product(path: Path, product: Product) -> Path:
             image.height = 140
             sheet.add_image(image, f"F{current_row}")
             sheet[f"F{current_row}"] = ""
-    workbook.save(path)
+    try:
+        _save_workbook_atomic(workbook, path)
+    except PermissionError as error:
+        raise WorkbookLockedError(
+            f"File Excel '{path.name}' đang được mở hoặc bị chương trình khác sử dụng. "
+            "Hãy đóng file trong Microsoft Excel/Preview rồi gửi lại link sản phẩm."
+        ) from error
+    finally:
+        workbook.close()
     return path
